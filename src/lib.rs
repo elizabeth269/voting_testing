@@ -2,9 +2,9 @@
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use thiserror::Error;
-use zokrates_core::{compile::compile, ir::Prog, proof_system::*};
-use zokrates_field::Bn128Field;
+// use thiserror::Error;
+// use zokrates_core::{compile::compile, ir::Prog, proof_system::*};
+// use zokrates_field::Bn128Field;
 
 #[derive(Error, Debug)]
 pub enum VotingError {
