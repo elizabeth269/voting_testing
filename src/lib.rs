@@ -2,8 +2,23 @@
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use thiserror::Error;
 use zokrates_core::{compile::compile, ir::Prog, proof_system::*};
 use zokrates_field::Bn128Field;
+
+#[derive(Error, Debug)]
+pub enum VotingError {
+    #[error("Voter not registered")]
+    VoterNotRegistered,
+    #[error("Invalid proof")]
+    InvalidProof,
+    #[error("Voter has already voted")]
+    AlreadyVoted,
+    #[error("ZoKrates error: {0}")]
+    ZoKratesError(String),
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
+}
 
 pub struct Voter {
     id: String,
@@ -19,21 +34,22 @@ pub struct VotingSystem {
 }
 
 impl VotingSystem {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, VotingError> {
         let source = r#"
             def main(private field secret, public field hash) -> bool:
                 return sha256packed([secret]) == hash
         "#;
-        let compiled = compile(source).unwrap();
-        let (proving_key, verification_key) = setup(&compiled).unwrap();
+        let compiled = compile(source).map_err(|e| VotingError::ZoKratesError(e.to_string()))?;
+        let (proving_key, verification_key) =
+            setup(&compiled).map_err(|e| VotingError::ZoKratesError(e.to_string()))?;
 
-        VotingSystem {
+        Ok(VotingSystem {
             voters: HashMap::new(),
             votes: HashMap::new(),
             compiled_program: compiled,
             proving_key,
             verification_key,
-        }
+        })
     }
 
     pub fn register_voter(&mut self, id: &str) {
@@ -53,21 +69,28 @@ impl VotingSystem {
         })
     }
 
-    pub fn cast_vote(&mut self, id: &str, vote: bool, proof: &str) -> bool {
-        if let Some(voter) = self.voters.get(id) {
-            if self.verify_proof(voter.secret, proof) {
-                self.votes.insert(id.to_string(), vote);
-                return true;
-            }
+    pub fn cast_vote(&mut self, id: &str, vote: bool, proof: &str) -> Result<(), VotingError> {
+        let voter = self.voters.get(id).ok_or(VotingError::VoterNotRegistered)?;
+
+        if self.votes.contains_key(id) {
+            return Err(VotingError::AlreadyVoted);
         }
-        false
+
+        if self.verify_proof(voter.secret, proof)? {
+            self.votes.insert(id.to_string(), vote);
+            Ok(())
+        } else {
+            Err(VotingError::InvalidProof)
+        }
     }
 
-    fn verify_proof(&self, secret: u64, proof: &str) -> bool {
-        let proof: Proof<Bn128Field> = serde_json::from_str(proof).unwrap();
+    fn verify_proof(&self, secret: u64, proof: &str) -> Result<bool, VotingError> {
+        let proof: Proof<Bn128Field> = serde_json::from_str(proof)
+            .map_err(|e| VotingError::SerializationError(e.to_string()))?;
         let hash = self.compute_hash(secret);
         let inputs = vec![Bn128Field::from(hash)];
-        verify(&self.verification_key, &proof, &inputs).unwrap()
+        verify(&self.verification_key, &proof, &inputs)
+            .map_err(|e| VotingError::ZoKratesError(e.to_string()))
     }
 
     fn compute_hash(&self, secret: u64) -> u64 {
@@ -83,14 +106,20 @@ impl VotingSystem {
         (yes_votes, no_votes)
     }
 
-    pub fn generate_proof(&self, id: &str) -> Option<String> {
-        if let Some(voter) = self.voters.get(id) {
-            let hash = self.compute_hash(voter.secret);
-            let witness = vec![Bn128Field::from(voter.secret), Bn128Field::from(hash)];
-            let proof = prove(&self.compiled_program, &self.proving_key, witness).unwrap();
-            Some(serde_json::to_string(&proof).unwrap())
-        } else {
-            None
-        }
+    pub fn generate_proof(&self, id: &str) -> Result<String, VotingError> {
+        let voter = self.voters.get(id).ok_or(VotingError::VoterNotRegistered)?;
+        let hash = self.compute_hash(voter.secret);
+        let witness = vec![Bn128Field::from(voter.secret), Bn128Field::from(hash)];
+        let proof = prove(&self.compiled_program, &self.proving_key, witness)
+            .map_err(|e| VotingError::ZoKratesError(e.to_string()))?;
+        serde_json::to_string(&proof).map_err(|e| VotingError::SerializationError(e.to_string()))
+    }
+
+    pub fn get_registered_voters(&self) -> Vec<String> {
+        self.voters.keys().cloned().collect()
+    }
+
+    pub fn has_voted(&self, id: &str) -> bool {
+        self.votes.contains_key(id)
     }
 }
